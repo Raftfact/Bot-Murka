@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  ds-bot:
+    build: .
+    container_name: ds-bot-mur
+    restart: unless-stopped
+    env_file:
+      - .env
