@@ -22,10 +22,12 @@ jobs:
             echo "Переходим в папку бота..."
             cd /opt/Bot-Murka
             
-            echo "Обновляем код из GitHub..."
-            git pull origin main
+            echo "Принудительно синхронизируем код с GitHub..."
+            git fetch --all
+            git reset --hard origin/main
             
             echo "Пересобираем и перезапускаем бота..."
+            docker compose down
             docker compose up -d --build
             
             echo "Очищаем старые образы..."
