@@ -1,0 +1,17 @@
+{
+  "REACTION_ROLE_CHANNEL_ID": 0,
+  "REACTION_ROLE_MAP": {
+  },
+  "AUTHORIZED_USER_IDS": [
+    "0"
+  ],
+  "HELP_TEXT": "Текст команды !help для администраторов",
+  "HELP_TEXT_PUBLIC": "Текст команды !help для обычных пользователей",
+  "TEMP_VOICE_CLEANUP_TIMEOUT_SECONDS": 5,
+  "TEMP_VOICE_CONFIG": {
+    "0": {
+      "monitor_channel_id": "0",
+      "owned_channels": {}
+    }
+  }
+}

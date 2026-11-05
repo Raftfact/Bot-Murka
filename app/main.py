@@ -1,255 +1,26 @@
 import asyncio
-import json
 import os
 from collections import deque
-from pathlib import Path
-
+import discord
+from discord.ext import commands
 import certifi
 from dotenv import load_dotenv
+from service.config_service import get_authorized_user_ids, read_config_data, save_reaction_role_config, write_config_data
+from service.role_service import handle_reaction, resolve_role, refresh_reaction_role_config
+from service.voice_service import get_temp_voice_cleanup_timeout, set_temp_voice_default_text_channel_id, get_temp_voice_config, save_temp_voice_config, get_temp_voice_default_text_channel_id, get_temp_voice_owner_for_channel, remove_temp_voice_owned_channel, update_temp_voice_owned_channel, set_temp_voice_text_channel_id, send_temp_voice_help_message, is_temp_voice_managed_channel
+
 
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
 load_dotenv()
 
-import discord
-from discord.ext import commands
-
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("Set DISCORD_TOKEN in environment before running")
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
 
-
-def load_reaction_role_config():
-    if not CONFIG_PATH.exists():
-        return None
-
-    try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as file:
-            config = json.load(file)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("config.json must contain valid JSON") from exc
-
-    channel_id = config.get("REACTION_ROLE_CHANNEL_ID")
-    mapping = config.get("REACTION_ROLE_MAP")
-
-    if not channel_id or not mapping:
-        return None
-
-    try:
-        channel_id = int(channel_id)
-    except ValueError as exc:
-        raise RuntimeError("REACTION_ROLE_CHANNEL_ID must be a numeric channel ID") from exc
-
-    if not isinstance(mapping, dict):
-        raise RuntimeError("REACTION_ROLE_MAP must be a JSON object of emoji -> role")
-
-    return channel_id, {str(emoji): str(role_spec) for emoji, role_spec in mapping.items()}
-
-
-def read_config_data():
-    if not CONFIG_PATH.exists():
-        return {}
-
-    try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except json.JSONDecodeError:
-        return {}
-
-
-def write_config_data(config):
-    with CONFIG_PATH.open("w", encoding="utf-8") as file:
-        json.dump(config, file, ensure_ascii=False, indent=2)
-        file.write("\n")
-
-
-def save_reaction_role_config(channel_id=None, mapping=None):
-    config = read_config_data()
-    if channel_id is not None:
-        config["REACTION_ROLE_CHANNEL_ID"] = channel_id
-    if mapping is not None:
-        config["REACTION_ROLE_MAP"] = mapping
-    write_config_data(config)
-    return config
-
-
-def get_authorized_user_ids():
-    config = read_config_data()
-    authorized_ids = config.get("AUTHORIZED_USER_IDS", [])
-    if isinstance(authorized_ids, list):
-        return [str(user_id) for user_id in authorized_ids if str(user_id).strip()]
-    return []
-
-
-def get_temp_voice_config(guild_id):
-    config = read_config_data()
-    temp_voice_config = config.get("TEMP_VOICE_CONFIG", {})
-    if not isinstance(temp_voice_config, dict):
-        temp_voice_config = {}
-    return temp_voice_config.get(str(guild_id), {})
-
-
-def save_temp_voice_config(guild_id, guild_config):
-    config = read_config_data()
-    temp_voice_config = config.get("TEMP_VOICE_CONFIG", {})
-    if not isinstance(temp_voice_config, dict):
-        temp_voice_config = {}
-    temp_voice_config[str(guild_id)] = guild_config
-    config["TEMP_VOICE_CONFIG"] = temp_voice_config
-    write_config_data(config)
-
-
-def get_temp_voice_owned_channels(guild_id):
-    guild_config = get_temp_voice_config(guild_id)
-    owned_channels = guild_config.get("owned_channels", {})
-    if not isinstance(owned_channels, dict):
-        owned_channels = {}
-    return {str(channel_id): str(owner_id) for channel_id, owner_id in owned_channels.items()}
-
-
-def update_temp_voice_owned_channel(guild_id, channel_id, owner_id):
-    guild_config = get_temp_voice_config(guild_id)
-    owned_channels = guild_config.get("owned_channels", {})
-    if not isinstance(owned_channels, dict):
-        owned_channels = {}
-    owned_channels[str(channel_id)] = str(owner_id)
-    guild_config["owned_channels"] = owned_channels
-    save_temp_voice_config(guild_id, guild_config)
-
-
-def get_temp_voice_owner_for_channel(guild_id, channel_id):
-    return get_temp_voice_owned_channels(guild_id).get(str(channel_id))
-
-
-def get_temp_voice_default_text_channel_id(guild_id):
-    guild_config = get_temp_voice_config(guild_id)
-    text_channel_id = guild_config.get("text_channel_id")
-    if text_channel_id is None:
-        return None
-    try:
-        return int(text_channel_id)
-    except (TypeError, ValueError):
-        return None
-
-
-def set_temp_voice_default_text_channel_id(guild_id, text_channel_id):
-    guild_config = get_temp_voice_config(guild_id)
-    guild_config["text_channel_id"] = str(text_channel_id)
-    save_temp_voice_config(guild_id, guild_config)
-
-
-def get_temp_voice_text_channel_id(guild_id, channel_id):
-    guild_config = get_temp_voice_config(guild_id)
-    text_channels = guild_config.get("text_channels", {})
-    if not isinstance(text_channels, dict):
-        text_channels = {}
-    return text_channels.get(str(channel_id))
-
-
-def set_temp_voice_text_channel_id(guild_id, channel_id, text_channel_id):
-    guild_config = get_temp_voice_config(guild_id)
-    text_channels = guild_config.get("text_channels", {})
-    if not isinstance(text_channels, dict):
-        text_channels = {}
-    text_channels[str(channel_id)] = str(text_channel_id)
-    guild_config["text_channels"] = text_channels
-    save_temp_voice_config(guild_id, guild_config)
-
-
-def remove_temp_voice_text_channel_id(guild_id, channel_id):
-    guild_config = get_temp_voice_config(guild_id)
-    text_channels = guild_config.get("text_channels", {})
-    if not isinstance(text_channels, dict):
-        text_channels = {}
-    text_channels.pop(str(channel_id), None)
-    guild_config["text_channels"] = text_channels
-    save_temp_voice_config(guild_id, guild_config)
-
-
-def is_temp_voice_managed_channel(guild_id, channel_id):
-    return str(channel_id) in get_temp_voice_owned_channels(guild_id)
-
-
-def remove_temp_voice_owned_channel(guild_id, channel_id):
-    guild_config = get_temp_voice_config(guild_id)
-    owned_channels = guild_config.get("owned_channels", {})
-    if not isinstance(owned_channels, dict):
-        owned_channels = {}
-    owned_channels.pop(str(channel_id), None)
-    guild_config["owned_channels"] = owned_channels
-    save_temp_voice_config(guild_id, guild_config)
-
-
-def get_temp_voice_cleanup_timeout():
-    config = read_config_data()
-    timeout = config.get("TEMP_VOICE_CLEANUP_TIMEOUT_SECONDS", 300)
-    try:
-        timeout = int(timeout)
-    except (TypeError, ValueError):
-        timeout = 300
-    return max(1, timeout)
-
-
-def build_temp_voice_help_message(owner_mention):
-    owner_mention = owner_mention or "владелец канала"
-    return (
-        f"{owner_mention}, команды для управления голосовым каналом:\n"
-        "!renamevoice <имя> — переименовать канал\n"
-        "!setvoiceuserlimit <число> — задать лимит участников\n"
-        "!voiceinfo — показать параметры канала"
-    )
-
-
-def normalize_channel_name(name):
-    if not name:
-        return ""
-    return "".join(ch for ch in name.lower() if ch.isalnum())
-
-
-async def send_temp_voice_help_message(guild, voice_channel, owner, text_channel_id=None):
-    if guild is None or voice_channel is None or owner is None:
-        return None
-
-    if text_channel_id is None:
-        tracked_text_channel_id = get_temp_voice_text_channel_id(guild.id, voice_channel.id)
-        if tracked_text_channel_id is None:
-            tracked_text_channel_id = get_temp_voice_default_text_channel_id(guild.id)
-        text_channel_id = tracked_text_channel_id
-
-    if text_channel_id is None:
-        return None
-
-    text_channel = guild.get_channel(int(text_channel_id))
-    if text_channel is None:
-        return None
-
-    owner_mention = owner.mention if hasattr(owner, "mention") else f"<@{owner.id}>"
-    try:
-        await text_channel.send(build_temp_voice_help_message(owner_mention))
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        print(f"Unable to send temporary voice help message: {exc}")
-        return None
-
-    return text_channel
-
-
-def refresh_reaction_role_config():
-    global REACTION_ROLE_CONFIG
-    try:
-        REACTION_ROLE_CONFIG = load_reaction_role_config()
-    except RuntimeError as exc:
-        print(f"Reaction roles disabled: {exc}")
-        REACTION_ROLE_CONFIG = None
-
-
-try:
-    refresh_reaction_role_config()
-except RuntimeError as exc:
-    print(f"Reaction roles disabled: {exc}")
-    REACTION_ROLE_CONFIG = None
+REACTION_ROLE_CONFIG = refresh_reaction_role_config()
 
 
 intents = discord.Intents.default()
@@ -314,11 +85,11 @@ async def help_command(ctx):
     if message_id is not None:
         if message_id in HELPED_HELP_MESSAGES:
             return
-        HELPED_HELP_MESSAGES.add(message_id)
-        HELPED_HELP_QUEUE.append(message_id)
-        if len(HELPED_HELP_QUEUE) > HELPED_HELP_QUEUE.maxlen:
+        if len(HELPED_HELP_QUEUE) == HELPED_HELP_QUEUE.maxlen:
             old_id = HELPED_HELP_QUEUE.popleft()
             HELPED_HELP_MESSAGES.discard(old_id)
+        HELPED_HELP_MESSAGES.add(message_id)
+        HELPED_HELP_QUEUE.append(message_id)
 
     config = read_config_data()
     public_help = config.get("HELP_TEXT_PUBLIC") or "Список доступных команд:\n!help"
@@ -330,6 +101,8 @@ async def help_command(ctx):
 
 @bot.command(name="setreactionchannel")
 async def setreactionchannel(ctx, channel: discord.TextChannel):
+    global REACTION_ROLE_CONFIG
+
     if not await ensure_reaction_management_access(ctx):
         return
 
@@ -339,12 +112,14 @@ async def setreactionchannel(ctx, channel: discord.TextChannel):
         return
 
     save_reaction_role_config(channel_id=channel.id)
-    refresh_reaction_role_config()
+    REACTION_ROLE_CONFIG = refresh_reaction_role_config()
     await ctx.send(f"Канал реакционных ролей установлен: {channel.mention}")
 
 
 @bot.command(name="addreactionrole")
 async def addreactionrole(ctx, emoji: str, role: discord.Role):
+    global REACTION_ROLE_CONFIG
+
     if not await ensure_reaction_management_access(ctx):
         return
 
@@ -359,12 +134,14 @@ async def addreactionrole(ctx, emoji: str, role: discord.Role):
 
     mapping[str(emoji)] = str(role.id)
     save_reaction_role_config(mapping=mapping)
-    refresh_reaction_role_config()
+    REACTION_ROLE_CONFIG = refresh_reaction_role_config()
     await ctx.send(f"Роль {role.mention} привязана к реакции {emoji}")
 
 
 @bot.command(name="delreactionrole")
 async def delreactionrole(ctx, emoji: str):
+    global REACTION_ROLE_CONFIG
+
     if not await ensure_reaction_management_access(ctx):
         return
 
@@ -379,7 +156,7 @@ async def delreactionrole(ctx, emoji: str):
 
     mapping.pop(str(emoji), None)
     save_reaction_role_config(mapping=mapping)
-    refresh_reaction_role_config()
+    REACTION_ROLE_CONFIG = refresh_reaction_role_config()
     await ctx.send(f"Привязка для реакции {emoji} удалена.")
 
 
@@ -578,78 +355,14 @@ async def voiceinfo(ctx):
     )
 
 
-def resolve_role(guild, role_spec):
-    try:
-        role_id = int(role_spec)
-    except ValueError:
-        return discord.utils.get(guild.roles, name=role_spec)
-    return guild.get_role(role_id)
-
-
-async def handle_reaction(payload, add_role: bool):
-    if not REACTION_ROLE_CONFIG:
-        return
-
-    channel_id, mapping = REACTION_ROLE_CONFIG
-    if payload.channel_id != channel_id:
-        return
-
-    if payload.user_id == bot.user.id:
-        return
-
-    guild = bot.get_guild(payload.guild_id)
-    if guild is None:
-        return
-
-    try:
-        member = await guild.fetch_member(payload.user_id)
-    except discord.NotFound:
-        return
-
-    emoji_keys = {payload.emoji.name}
-    if getattr(payload.emoji, "id", None) is not None:
-        emoji_keys.add(str(payload.emoji.id))
-        emoji_keys.add(f"<:{payload.emoji.name}:{payload.emoji.id}>")
-
-    role_spec = None
-    for emoji_key in emoji_keys:
-        if emoji_key in mapping:
-            role_spec = mapping[emoji_key]
-            break
-
-    if not role_spec:
-        return
-
-    role = resolve_role(guild, role_spec)
-    if role is None:
-        print(f"Role not found for spec: {role_spec}")
-        return
-
-    if not guild.me.guild_permissions.manage_roles:
-        print("Bot lacks permission to manage roles")
-        return
-
-    if role >= guild.me.top_role:
-        print(f"Cannot manage role {role.name}: it is above the bot's highest role")
-        return
-
-    try:
-        if add_role:
-            await member.add_roles(role, reason="Reaction role")
-        else:
-            await member.remove_roles(role, reason="Reaction role")
-    except discord.Forbidden as exc:
-        print(f"Cannot {'assign' if add_role else 'remove'} role {role.name}: {exc}")
-
-
 @bot.event
 async def on_raw_reaction_add(payload):
-    await handle_reaction(payload, add_role=True)
+    await handle_reaction(bot, payload, add_role=True)
 
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    await handle_reaction(payload, add_role=False)
+    await handle_reaction(bot, payload, add_role=False)
 
 
 @bot.event
@@ -660,10 +373,7 @@ async def cleanup_empty_temp_voice_channel(guild, channel):
     if not is_temp_voice_managed_channel(guild.id, channel.id):
         return
 
-    try:
-        if len(channel.members) > 0:
-            return
-    except Exception:
+    if channel.members:
         return
 
     try:
@@ -672,7 +382,8 @@ async def cleanup_empty_temp_voice_channel(guild, channel):
     except discord.NotFound:
         remove_temp_voice_owned_channel(guild.id, channel.id)
         return
-    except discord.Forbidden:
+    except discord.Forbidden as exc:
+        print(f"Cannot delete empty temporary voice channel {channel.id}: {exc}")
         return
 
 
@@ -703,6 +414,9 @@ async def on_voice_state_update(member, before, after):
     if after.channel is not None and after.channel.id == monitor_channel_id:
         if not guild.me.guild_permissions.manage_channels:
             return
+        if not guild.me.guild_permissions.move_members:
+            print("Bot lacks permission to move members into temporary voice channels")
+            return
 
         category = after.channel.category
         channel_name = f"🎧 {member.display_name}"
@@ -716,12 +430,12 @@ async def on_voice_state_update(member, before, after):
         )
 
         update_temp_voice_owned_channel(guild.id, created_channel.id, member.id)
+        asyncio.create_task(schedule_temp_voice_cleanup(guild, created_channel))
         default_text_channel_id = get_temp_voice_default_text_channel_id(guild.id)
         if default_text_channel_id is not None:
             set_temp_voice_text_channel_id(guild.id, created_channel.id, default_text_channel_id)
         await member.move_to(created_channel, reason="Temporary voice channel")
         await send_temp_voice_help_message(guild, created_channel, member)
-        asyncio.create_task(schedule_temp_voice_cleanup(guild, created_channel))
         return
 
     if before.channel is None:
