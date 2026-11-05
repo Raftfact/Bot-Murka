@@ -20,7 +20,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             echo "Переходим в папку бота..."
-            cd /opt/ds-bot-Mur
+            cd /opt/Bot-Murka
             
             echo "Обновляем код из GitHub..."
             git pull origin main
